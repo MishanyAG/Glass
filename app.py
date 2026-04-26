@@ -301,7 +301,7 @@ def dependency_calculator(dependency: Dependency, key_prefix: str) -> None:
 
     st.markdown("### Экспертное задание пяти точек")
     st.caption(
-        "Для каждой точки задается уровень входной переменной X и три экспертные оценки выходной переменной Y. "
+        "Для каждой точки уровень входной переменной X задан фиксированно, а три эксперта оценивают выходную переменную Y. "
         "После этого выполняется дефаззификация: числовое значение Y получается как среднее экспертных уровней."
     )
 
@@ -324,13 +324,9 @@ def dependency_calculator(dependency: Dependency, key_prefix: str) -> None:
         with st.expander(f"Точка {i}", expanded=True):
             col_x, col_e1, col_e2, col_e3 = st.columns(4)
 
-            x = col_x.selectbox(
-                "X",
-                options=list(LINGUISTIC_LEVELS.keys()),
-                index=default_x - 1,
-                format_func=level_label,
-                key=f"{key_prefix}_x_{i}",
-            )
+            x = default_x
+            col_x.markdown("**Уровень X**")
+            col_x.info(level_label(x))
 
             e1 = col_e1.selectbox(
                 "Эксперт 1",
@@ -357,9 +353,6 @@ def dependency_calculator(dependency: Dependency, key_prefix: str) -> None:
             x_values.append(int(x))
             expert_scores.append((int(e1), int(e2), int(e3)))
 
-    combined = sorted(zip(x_values, expert_scores), key=lambda item: item[0])
-    x_values = [item[0] for item in combined]
-    expert_scores = [item[1] for item in combined]
     points: List[Tuple[float, float]] = [
         (float(x), defuzzify_expert_scores(scores))
         for x, scores in zip(x_values, expert_scores)
