@@ -65,7 +65,8 @@ class Dependency:
     target_code: str
     target_name: str
     description: str
-    default_points: List[Tuple[int, int]]
+    default_x: List[int]
+    default_expert_scores: List[Tuple[int, int, int]]
 
 
 DEPENDENCIES: Dict[str, Dependency] = {
@@ -79,7 +80,14 @@ DEPENDENCIES: Dict[str, Dependency] = {
             "Экспертная зависимость между сложностью выбранного режима производства "
             "и скоростью вращения роликов утоняющих устройств."
         ),
-        default_points=[(1, 2), (2, 3), (4, 4), (6, 6), (7, 7)],
+        default_x=[1, 2, 4, 6, 7],
+        default_expert_scores=[
+            (1, 2, 2),
+            (2, 3, 3),
+            (4, 4, 4),
+            (6, 6, 5),
+            (7, 7, 6),
+        ],
     ),
     "R2": Dependency(
         code="R2",
@@ -91,7 +99,14 @@ DEPENDENCIES: Dict[str, Dependency] = {
             "Экспертная зависимость между сложностью выбранного режима производства "
             "и температурой расплава металла."
         ),
-        default_points=[(1, 2), (2, 3), (4, 5), (6, 6), (7, 7)],
+        default_x=[1, 2, 4, 6, 7],
+        default_expert_scores=[
+            (1, 2, 2),
+            (3, 3, 2),
+            (5, 4, 5),
+            (6, 6, 6),
+            (7, 7, 6),
+        ],
     ),
 }
 
@@ -113,22 +128,45 @@ def build_scale_df() -> pd.DataFrame:
     )
 
 
-def build_points_df(points: List[Tuple[int, int]], dependency: Dependency) -> pd.DataFrame:
+def defuzzify_expert_scores(scores: Tuple[int, int, int]) -> float:
+    """
+    Упрощенная дефаззификация экспертных оценок.
+    Каждый эксперт задает лингвистическую оценку уровнем 1...7.
+    Числовое значение точки Y получается как среднее экспертных уровней.
+    """
+    return float(np.mean(scores))
+
+
+def nearest_linguistic_value(value: float) -> Tuple[int, str]:
+    nearest = int(np.clip(round(value), 1, 7))
+    return nearest, LINGUISTIC_LEVELS[nearest]
+
+
+def build_points_df(
+    x_values: List[int],
+    expert_scores: List[Tuple[int, int, int]],
+    dependency: Dependency,
+) -> pd.DataFrame:
     rows = []
-    for index, (x, y) in enumerate(points, start=1):
+    for index, (x, scores) in enumerate(zip(x_values, expert_scores), start=1):
+        y_value = defuzzify_expert_scores(scores)
+        nearest_y, nearest_y_label = nearest_linguistic_value(y_value)
         rows.append(
             {
                 "Точка": index,
                 f"{dependency.source_code}: {dependency.source_name}": x,
                 "Значение X": LINGUISTIC_LEVELS[x],
-                f"{dependency.target_code}: {dependency.target_name}": y,
-                "Значение Y": LINGUISTIC_LEVELS[y],
+                "Эксперт 1": level_label(scores[0]),
+                "Эксперт 2": level_label(scores[1]),
+                "Эксперт 3": level_label(scores[2]),
+                "Y после дефаззификации": round(y_value, 3),
+                "Ближайший уровень Y": f"{nearest_y} — {nearest_y_label}",
             }
         )
     return pd.DataFrame(rows)
 
 
-def fit_curve(points: List[Tuple[int, int]], degree: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def fit_curve(points: List[Tuple[float, float]], degree: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     x = np.array([p[0] for p in points], dtype=float)
     y = np.array([p[1] for p in points], dtype=float)
 
@@ -176,20 +214,15 @@ def polynomial_to_string(coeffs: np.ndarray) -> str:
     return result
 
 
-def calculate_by_curve(x_value: float, points: List[Tuple[int, int]], degree: int) -> float:
+def calculate_by_curve(x_value: float, points: List[Tuple[float, float]], degree: int) -> float:
     _, _, coeffs = fit_curve(points, degree)
     y_value = float(np.polyval(coeffs, x_value))
     return float(np.clip(y_value, 1, 7))
 
 
-def nearest_linguistic_value(value: float) -> Tuple[int, str]:
-    nearest = int(np.clip(round(value), 1, 7))
-    return nearest, LINGUISTIC_LEVELS[nearest]
-
-
 def make_dependency_chart(
     dependency: Dependency,
-    points: List[Tuple[int, int]],
+    points: List[Tuple[float, float]],
     degree: int,
     x_test: float | None = None,
     y_test: float | None = None,
@@ -218,7 +251,7 @@ def make_dependency_chart(
             text=[f"P{i}" for i in range(1, len(points) + 1)],
             textposition="top center",
             marker={"size": 12},
-            name="Экспертные точки",
+            name="Точки после дефаззификации",
         )
     )
 
@@ -266,8 +299,11 @@ def dependency_calculator(dependency: Dependency, key_prefix: str) -> None:
         """
     )
 
-    st.markdown("### Экспертные точки")
-    st.caption("Необходимо задать 5 точек зависимости в прямоугольной системе координат.")
+    st.markdown("### Экспертное задание пяти точек")
+    st.caption(
+        "Для каждой точки задается уровень входной переменной X и три экспертные оценки выходной переменной Y. "
+        "После этого выполняется дефаззификация: числовое значение Y получается как среднее экспертных уровней."
+    )
 
     degree = st.slider(
         "Степень аппроксимирующего полинома",
@@ -278,32 +314,59 @@ def dependency_calculator(dependency: Dependency, key_prefix: str) -> None:
         key=f"{key_prefix}_degree",
     )
 
-    cols = st.columns(5)
-    points: List[Tuple[int, int]] = []
+    x_values: List[int] = []
+    expert_scores: List[Tuple[int, int, int]] = []
 
-    for i, col in enumerate(cols, start=1):
-        default_x, default_y = dependency.default_points[i - 1]
-        with col:
-            st.markdown(f"**Точка {i}**")
-            x = st.selectbox(
+    for i in range(1, 6):
+        default_x = dependency.default_x[i - 1]
+        default_scores = dependency.default_expert_scores[i - 1]
+
+        with st.expander(f"Точка {i}", expanded=True):
+            col_x, col_e1, col_e2, col_e3 = st.columns(4)
+
+            x = col_x.selectbox(
                 "X",
                 options=list(LINGUISTIC_LEVELS.keys()),
                 index=default_x - 1,
                 format_func=level_label,
                 key=f"{key_prefix}_x_{i}",
             )
-            y = st.selectbox(
-                "Y",
+
+            e1 = col_e1.selectbox(
+                "Эксперт 1",
                 options=list(LINGUISTIC_LEVELS.keys()),
-                index=default_y - 1,
+                index=default_scores[0] - 1,
                 format_func=level_label,
-                key=f"{key_prefix}_y_{i}",
+                key=f"{key_prefix}_e1_{i}",
             )
-            points.append((int(x), int(y)))
+            e2 = col_e2.selectbox(
+                "Эксперт 2",
+                options=list(LINGUISTIC_LEVELS.keys()),
+                index=default_scores[1] - 1,
+                format_func=level_label,
+                key=f"{key_prefix}_e2_{i}",
+            )
+            e3 = col_e3.selectbox(
+                "Эксперт 3",
+                options=list(LINGUISTIC_LEVELS.keys()),
+                index=default_scores[2] - 1,
+                format_func=level_label,
+                key=f"{key_prefix}_e3_{i}",
+            )
 
-    points = sorted(points, key=lambda p: p[0])
-    points_df = build_points_df(points, dependency)
+            x_values.append(int(x))
+            expert_scores.append((int(e1), int(e2), int(e3)))
 
+    combined = sorted(zip(x_values, expert_scores), key=lambda item: item[0])
+    x_values = [item[0] for item in combined]
+    expert_scores = [item[1] for item in combined]
+    points: List[Tuple[float, float]] = [
+        (float(x), defuzzify_expert_scores(scores))
+        for x, scores in zip(x_values, expert_scores)
+    ]
+
+    points_df = build_points_df(x_values, expert_scores, dependency)
+    st.markdown("### Таблица экспертных оценок и точек после дефаззификации")
     st.dataframe(points_df, use_container_width=True)
 
     st.markdown("### Расчёт значения по построенной зависимости")
@@ -343,13 +406,13 @@ def dependency_calculator(dependency: Dependency, key_prefix: str) -> None:
 
 st.title("🧊 Формирование зависимостей между логико-лингвистическими переменными")
 st.markdown(
-    "Веб-приложение предназначено для экспертного задания зависимостей между переменными модели технологического процесса производства листового стекла."
+    "Веб-приложение предназначено для экспертного формирования зависимостей между переменными модели технологического процесса производства листового стекла."
 )
 
 st.info(
-    "Для выбранной зависимости экспертно задаются 5 точек в прямоугольной системе координат. "
-    "На основе этих точек строится аппроксимирующая кривая, отражающая характер связи между двумя "
-    "логико-лингвистическими переменными."
+    "Для выбранной зависимости задаются 5 точек в прямоугольной системе координат. "
+    "Значения точек формируются на основе экспертных лингвистических оценок и их последующей дефаззификации. "
+    "По полученным точкам строится аппроксимирующая кривая зависимости."
 )
 
 
@@ -367,8 +430,8 @@ with tab1:
     st.markdown(
         """
 В модели рассматриваются логико-лингвистические переменные технологического процесса производства листового стекла.
-Для выбранных пар переменных экспертно задаются 5 точек зависимости. После этого через точки проводится кривая,
-отражающая характер влияния одной переменной на другую.
+Для выбранных пар переменных экспертно задаются оценки зависимости. После дефаззификации экспертных оценок
+получаются 5 точек, через которые строится аппроксимирующая кривая.
         """
     )
 
@@ -385,6 +448,17 @@ with tab1:
         ]
     )
     st.dataframe(selected_df, use_container_width=True)
+
+    st.markdown("### Используемый алгоритм")
+    st.markdown(
+        """
+1. Выбирается пара логико-лингвистических переменных.
+2. Для пяти уровней входной переменной задаются экспертные оценки выходной переменной.
+3. Экспертные оценки переводятся в числовую форму по шкале 1–7.
+4. Для каждой точки выполняется дефаззификация: определяется среднее числовое значение Y.
+5. По полученным пяти точкам строится аппроксимирующая кривая зависимости.
+        """
+    )
 
 with tab2:
     dependency_calculator(DEPENDENCIES["R1"], "r1")
